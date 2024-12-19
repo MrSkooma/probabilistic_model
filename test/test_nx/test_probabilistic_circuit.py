@@ -8,12 +8,15 @@ from random_events.interval import closed, SimpleInterval
 from random_events.set import SetElement
 from random_events.variable import Continuous
 
+from probabilistic_model.distributions import SymbolicDistribution
 from probabilistic_model.distributions.uniform import UniformDistribution
+from probabilistic_model.probabilistic_circuit.nx.distributions import UnivariateContinuousLeaf, UnivariateDiscreteLeaf
 from probabilistic_model.probabilistic_circuit.nx.probabilistic_circuit import *
-#from probabilistic_model.probabilistic_circuit.nx.probabilistic_circuit import ProbabilisticCircuit, SumUnit, ProductUnit, SimpleEvent, ShallowProbabilisticCircuit
-from probabilistic_model.probabilistic_circuit.nx.distributions import UnivariateContinuousLeaf
 import plotly.graph_objects as go
 from probabilistic_model.monte_carlo_estimator import MonteCarloEstimator
+
+from probabilistic_model.utils import MissingDict
+
 
 class SymbolEnum(SetElement):
     EMPTY_SET = -1
@@ -78,20 +81,22 @@ class SmallCircuitTestCast(unittest.TestCase):
         fig = go.Figure(self.model.plot(600, surface=True))
         # fig.show()
 
+class SymbolicPlottingTestCase(unittest.TestCase):
+    x = Symbolic("x", SymbolEnum)
+    model: ProbabilisticCircuit
 
+    @classmethod
+    def setUpClass(cls):
+        probabilities = MissingDict(float)
+        probabilities[int(SymbolEnum.A)] = 7 / 20
+        probabilities[int(SymbolEnum.B)] = 13 / 20
+        cls.model = ProbabilisticCircuit()
+        l1 = UnivariateDiscreteLeaf(SymbolicDistribution(cls.x, probabilities))
+        cls.model.add_node(l1)
 
-# class PyCRAMErrorTestCase(unittest.TestCase):
-#
-#     path = os.path.join(os.path.expanduser("~"), "Documents", "model.json")
-#     with open(path, "r") as file:
-#         model: ProbabilisticCircuit = ProbabilisticCircuit.from_json(json.load(file))
-#
-#     def test_error(self):
-#         arm, grasp, rx, ry = self.model.variables
-#         self.model.marginal([rx, ry])
-#         print(self.model.variables)
-#
-#
+    def test_plot(self):
+        fig = go.Figure(self.model.plot(), self.model.plotly_layout())
+        # fig.show()
 
 
 class ShallowTestCase(unittest.TestCase):
@@ -190,6 +195,7 @@ class L1MetricTestCase(unittest.TestCase):
         mc_esti = MonteCarloEstimator(sample_size=1000, model=self.circuit_1)
         result = mc_esti.l1(self.circuit_2)
         self.assertAlmostEqual(result/2, 0.13333333333333336, delta=0.1)
+
 
 if __name__ == '__main__':
     unittest.main()
