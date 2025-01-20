@@ -20,10 +20,11 @@ from scipy.sparse import coo_matrix, coo_array, csc_array
 from sortedcontainers import SortedSet
 from typing_extensions import List, Iterator, Tuple, Union, Type, Dict, Any, Self, Optional
 
-from . import shrink_index_array
+from . import shrink_index_array, embed_sparse_array_in_nan_array
 from .utils import copy_bcoo, sample_from_sparse_probabilities_csc, sparse_remove_rows_and_cols_where_all
 from ..nx.probabilistic_circuit import (SumUnit, ProductUnit, Unit,
                                         ProbabilisticCircuit as NXProbabilisticCircuit)
+from jax.scipy.special import logsumexp
 
 
 def inverse_class_of(clazz: Type[Unit]) -> Type[Layer]:
@@ -42,6 +43,18 @@ class Layer(eqx.Module, SubclassJSONSerializer, ABC):
     Layers have the same scope (set of variables) for every node in them.
     """
 
+    _variables: Optional[jnp.array] = eqx.field(static=False, default=None)
+    """
+    The variable indices of the layer.
+    """
+
+    @property
+    def variables(self) -> jax.Array:
+        raise NotImplementedError
+
+    def set_variables(self, value: jax.Array):
+        raise NotImplementedError
+
     @abstractmethod
     def log_likelihood_of_nodes_single(self, x: jnp.array) -> jnp.array:
         """
@@ -57,30 +70,6 @@ class Layer(eqx.Module, SubclassJSONSerializer, ABC):
         Vectorized version of :meth:`log_likelihood_of_nodes_single`
         """
         return jax.vmap(self.log_likelihood_of_nodes_single)(x)
-
-    def cdf_of_nodes_single(self, x: jnp.array) -> jnp.array:
-        """
-        Calculate the cumulative distribution function of the distribution if applicable.
-
-        :param x: The input vector.
-        :return: The cumulative distribution function of every node in the layer for x.
-        """
-        raise NotImplementedError
-
-    def cdf_of_nodes(self, x: jnp.array) -> jnp.array:
-        """
-        Vectorized version of :meth:`cdf_of_nodes_single`
-        """
-        return jax.vmap(self.cdf_of_nodes_single)(x)
-
-    def probability_of_simple_event(self, event: SimpleEvent) -> jnp.array:
-        """
-        Calculate the probability of a simple event P(E).
-
-        :param event: The simple event to calculate the probability for. It has to contain every variable.
-        :return: P(E)
-        """
-        raise NotImplementedError
 
     def validate(self):
         """
@@ -107,14 +96,6 @@ class Layer(eqx.Module, SubclassJSONSerializer, ABC):
         """
         return [(depth, self)]
 
-    @property
-    @abstractmethod
-    def variables(self) -> jax.Array:
-        """
-        :return: The variable indices of this layer.
-        """
-        raise NotImplementedError
-
     def __deepcopy__(self) -> 'Layer':
         """
         Create a deep copy of the layer.
@@ -128,8 +109,8 @@ class Layer(eqx.Module, SubclassJSONSerializer, ABC):
         """
         return tuple()
 
-    def to_nx(self, variables: SortedSet[Variable], progress_bar: Optional[tqdm.tqdm] = None) -> List[
-        Unit]:
+    def to_nx(self, variables: SortedSet[Variable], result: NXProbabilisticCircuit,
+              progress_bar: Optional[tqdm.tqdm] = None,) -> List[Unit]:
         """
         Convert the layer to a networkx circuit.
         For every node in this circuit, a corresponding node in the networkx circuit
@@ -137,25 +118,10 @@ class Layer(eqx.Module, SubclassJSONSerializer, ABC):
         The nodes all belong to the same circuit.
 
         :param variables: The variables of the circuit.
+        :param result: The resulting circuit to write into
         :param progress_bar: A progress bar to show the progress.
+
         :return: The nodes of the networkx circuit.
-        """
-        raise NotImplementedError
-
-    @property
-    def impossible_condition_result(self) -> Tuple[None, jax.Array]:
-        """
-        :return: The result that a layer yields if it is conditioned on an event E with P(E) = 0
-        """
-        return None, jnp.full((self.number_of_nodes,), -jnp.inf, dtype=jnp.float32)
-
-    def log_conditional_of_simple_event(self, event: SimpleEvent, ) -> Tuple[Optional[Self], jax.Array]:
-        """
-        Calculate the conditional probability distribution given a simple event P(X|E).
-        Also return the log probability of E log(P(E)).
-
-        :param event: The event to calculate the conditional distribution for.
-        :return: The conditional distribution and the log probability of the event.
         """
         raise NotImplementedError
 
@@ -183,6 +149,7 @@ class Layer(eqx.Module, SubclassJSONSerializer, ABC):
             for scope in unique_scopes:
                 nodes_of_current_type_and_scope = [node for node in nodes_of_current_type if
                                                    tuple(node.variables) == scope]
+
                 layer = layer_type.create_layer_from_nodes_with_same_type_and_scope(nodes_of_current_type_and_scope,
                                                                                     child_layers, progress_bar)
                 result.append(layer)
@@ -219,41 +186,11 @@ class Layer(eqx.Module, SubclassJSONSerializer, ABC):
         return number_of_parameters
 
     @property
-    def number_of_components(self) -> 0:
+    def number_of_components(self) -> int:
         """
         :return: The number of components (leaves + edges) of the entire circuit
         """
         return self.number_of_nodes
-
-    def sample_from_frequencies(self, frequencies: np.array, result: np.array, start_index=0):
-        raise NotImplementedError
-
-    def moment_of_nodes(self, order: jax.Array, center: jax.Array):
-        """
-        Calculate the moment of the nodes.
-        The order and center vectors describe the moments for all variables in the entire model. Hence, they should
-        never be touched by the forward pass.
-
-        :param order: The order of the moment for each variable.
-        :param center: The center of the moment for each variable.
-        :return: The moments of the nodes with shape (#nodes, #variables).
-        """
-        raise NotImplementedError
-
-    def merge_with(self, others: List[Self]) -> Self:
-        """
-        Merge the layer with others of the same type.
-        """
-        raise NotImplementedError
-
-    def remove_nodes(self, remove_mask: jax.Array) -> Self:
-        """
-        Remove nodes from the layer.
-
-        :param remove_mask: A boolean mask of the nodes to remove.
-        :return: The layer with the nodes removed.
-        """
-        raise NotImplementedError
 
 
 class InnerLayer(Layer, ABC):
@@ -269,11 +206,13 @@ class InnerLayer(Layer, ABC):
     def __init__(self, child_layers: List[Layer]):
         super().__init__()
         self.child_layers = child_layers
+        self.variables # initialize the variables of the layer
 
-    @property
-    @abstractmethod
-    def variables(self) -> jax.Array:
-        raise NotImplementedError
+    def set_variables(self, value: jnp.array):
+        raise AttributeError("Variables of inner layers are read-only.")
+
+    def reset_variables(self):
+        object.__setattr__(self, "_variables", None)
 
     def all_layers(self) -> List[Layer]:
         """
@@ -298,12 +237,6 @@ class InnerLayer(Layer, ABC):
         result["child_layers"] = [child_layer.to_json() for child_layer in self.child_layers]
         return result
 
-    def clean_up_orphans(self) -> Self:
-        """
-        Clean up the layer by removing orphans in the child layers.
-        """
-        raise NotImplementedError
-
 
 class InputLayer(Layer, ABC):
     """
@@ -313,11 +246,6 @@ class InputLayer(Layer, ABC):
     calculation works without bottleneck statements like if/else or loops.
     """
 
-    _variables: jnp.array = eqx.field(static=True)
-    """
-    The variable indices of the layer.
-    """
-
     def __init__(self, variable: int):
         super().__init__()
         self._variables = jnp.array([variable])
@@ -325,6 +253,9 @@ class InputLayer(Layer, ABC):
     @property
     def variables(self) -> jax.Array:
         return self._variables
+
+    def set_variables(self, value: jax.Array):
+        object.__setattr__(self, "_variables", value)
 
     def to_json(self) -> Dict[str, Any]:
         result = super().to_json()
@@ -336,11 +267,12 @@ class InputLayer(Layer, ABC):
         return self._variables[0].item()
 
 
-class SumLayer(InnerLayer):
-    log_weights: List[BCOO]
+class SumLayer(InnerLayer, ABC):
+
+    log_weights: List[Union[jax.array, BCOO]]
     child_layers: Union[List[[ProductLayer]], List[InputLayer]]
 
-    def __init__(self, child_layers: List[Layer], log_weights: List[BCOO]):
+    def __init__(self, child_layers: List[Layer], log_weights: List[Union[jax.array, BCOO]]):
         super().__init__(child_layers)
         self.log_weights = log_weights
 
@@ -351,14 +283,7 @@ class SumLayer(InnerLayer):
         for log_weights, child_layer in self.log_weighted_child_layers:
             assert log_weights.shape[
                        1] == child_layer.number_of_nodes, "The number of nodes must match the number of weights."
-
-    @cached_property
-    def variables(self) -> jax.Array:
-        return self.child_layers[0].variables
-
-    @classmethod
-    def nx_classes(cls) -> Tuple[Type, ...]:
-        return SumUnit,
+            assert (child_layer.variables == self.variables).all(), "The variables must match."
 
     @property
     def log_weighted_child_layers(self) -> Iterator[Tuple[BCOO, Layer]]:
@@ -368,8 +293,23 @@ class SumLayer(InnerLayer):
         yield from zip(self.log_weights, self.child_layers)
 
     @property
+    def variables(self) -> jax.Array:
+        if self._variables is None:
+            object.__setattr__(self, "_variables", self.child_layers[0].variables)
+        return self._variables
+
+    @property
     def number_of_nodes(self) -> int:
         return self.log_weights[0].shape[0]
+
+
+class SparseSumLayer(SumLayer):
+
+    log_weights: List[BCOO]
+
+    @classmethod
+    def nx_classes(cls) -> Tuple[Type, ...]:
+        return SumUnit,
 
     @property
     def number_of_components(self) -> int:
@@ -385,9 +325,10 @@ class SumLayer(InnerLayer):
     @property
     def log_normalization_constants(self) -> jax.Array:
         result = self.concatenated_log_weights
-        result.data = jnp.exp(result.data)
+        maximum = result.data.max()
+        result.data = jnp.exp(result.data - maximum)
         result = result.sum(1).todense()
-        return jnp.log(result)
+        return maximum + jnp.log(result)
 
     @property
     def normalized_weights(self):
@@ -412,168 +353,10 @@ class SumLayer(InnerLayer):
             # multiply the weights with the child layer likelihood
             cloned_log_weights.data += child_layer_log_likelihood[cloned_log_weights.indices[:, 1]]
             cloned_log_weights.data = jnp.exp(cloned_log_weights.data)  # exponent weights
+            result = result.at[cloned_log_weights.indices[:, 0]].add(cloned_log_weights.data,
+                                                                     indices_are_sorted=False, unique_indices=False)
 
-            # sum the weights for each node
-            ll = cloned_log_weights.sum(1).todense()
-
-            # sum the child layer result
-            result += ll
-
-        return jnp.where(result > 0, jnp.log(result) - self.log_normalization_constants, -jnp.inf)
-
-    def cdf_of_nodes_single(self, x: jnp.array) -> jnp.array:
-        result = jnp.zeros(self.number_of_nodes, dtype=jnp.float32)
-
-        for log_weights, child_layer in self.log_weighted_child_layers:
-            # get the cdf of the child nodes
-            child_layer_cdf = child_layer.cdf_of_nodes_single(x)
-
-            # weight the cdf of the child nodes by the weight for each node of this layer
-            cloned_log_weights = copy_bcoo(log_weights)  # clone the weights
-
-            # multiply the weights with the child layer cdf
-            cloned_log_weights.data = jnp.exp(cloned_log_weights.data)  # exponent weights
-            cloned_log_weights.data *= child_layer_cdf[cloned_log_weights.indices[:, 1]]
-
-            # sum the weights for each node
-            ll = cloned_log_weights.sum(1).todense()
-
-            # sum the child layer result
-            result += ll
-
-        # normalize the result
-        normalization_constants = jnp.exp(self.log_normalization_constants)
-        return result / normalization_constants
-
-    def probability_of_simple_event(self, event: SimpleEvent) -> jnp.array:
-        result = jnp.zeros(self.number_of_nodes, dtype=jnp.float32)
-
-        for log_weights, child_layer in self.log_weighted_child_layers:
-            # get the probability of the child nodes
-            child_layer_prob = child_layer.probability_of_simple_event(event)
-
-            # weight the probability of the child nodes by the weight for each node of this layer
-            cloned_log_weights = copy_bcoo(log_weights)  # clone the weights
-
-            # multiply the weights with the child layer cdf
-            cloned_log_weights.data = jnp.exp(cloned_log_weights.data)  # exponent weights
-            cloned_log_weights.data *= child_layer_prob[cloned_log_weights.indices[:, 1]]
-
-            # sum the weights for each node
-            ll = cloned_log_weights.sum(1).todense()
-
-            # sum the child layer result
-            result += ll
-
-        # normalize the result
-        normalization_constants = jnp.exp(self.log_normalization_constants)
-        return result / normalization_constants
-
-    def moment_of_nodes(self, order: jax.Array, center: jax.Array):
-        result = jnp.zeros((self.number_of_nodes, len(self.variables)), dtype=jnp.float32)
-
-        for log_weights, child_layer in self.log_weighted_child_layers:
-            # get the moment of the child nodes
-            moment = child_layer.moment_of_nodes(order, center)  # shape (#child_layer_nodes, #variables)
-
-            # weight the moment of the child nodes by the weight for each node of this layer
-            weights = copy_bcoo(log_weights)  # clone the weights, shape (#nodes, #child_layer_nodes)
-            weights.data = jnp.exp(weights.data)  # exponent weights
-
-            #  calculate the weighted sum in layer
-            moment = weights @ moment
-
-            # sum the child layer result
-            result += moment
-
-        return result / jnp.exp(self.log_normalization_constants.reshape(-1, 1))
-
-    def sample_from_frequencies(self, frequencies: np.array, result: np.array, start_index=0):
-        node_to_child_frequency_map = self.node_to_child_frequency_map(frequencies)
-
-        # offset for shifting through the frequencies of the node_to_child_frequency_map
-        prev_column_index = 0
-
-        consumed_indices = start_index
-
-        for child_layer in self.child_layers:
-            # extract the frequencies for the child layer
-            current_frequency_block = node_to_child_frequency_map[:,
-                                      prev_column_index:prev_column_index + child_layer.number_of_nodes]
-            frequencies_for_child_nodes = current_frequency_block.sum(0)
-            child_layer.sample_from_frequencies(frequencies_for_child_nodes, result, consumed_indices)
-            consumed_indices += frequencies_for_child_nodes.sum()
-
-            # shift the offset
-            prev_column_index += child_layer.number_of_nodes
-
-    def node_to_child_frequency_map(self, frequencies: np.array):
-        """
-        Sample from the exact distribution of the layer by interpreting every node as latent variable.
-        This is very slow due to BCOO.sum_duplicates being very slow.
-
-        :param frequencies:
-        :param key:
-        :return:
-        """
-        clw = self.normalized_weights
-        csr = coo_matrix((clw.data, clw.indices.T), shape=clw.shape).tocsr(copy=False)
-        return sample_from_sparse_probabilities_csc(csr, frequencies)
-
-    def log_conditional_of_simple_event(self, event: SimpleEvent, ) -> Tuple[Optional[Self], jax.Array]:
-        conditional_child_layers = []
-        conditional_log_weights = []
-
-        probabilities = jnp.zeros(self.number_of_nodes, dtype=jnp.float32)
-
-        for log_weights, child_layer in self.log_weighted_child_layers:
-            # get the conditional of the child layer
-            conditional, child_log_prob = child_layer.log_conditional_of_simple_event(event)
-            if conditional is None:
-                continue
-
-            # clone weights
-            log_weights = copy_bcoo(log_weights)
-
-            # calculate the weighted sum of the child log probabilities
-            log_weights.data += child_log_prob[log_weights.indices[:, 1]]
-
-            # skip if this layer is not connected to anything anymore
-            if jnp.all(log_weights.data == -jnp.inf):
-                continue
-
-            log_weights.data = jnp.exp(log_weights.data)
-
-            # calculate the probabilities of the child nodes in total
-            current_probabilities = log_weights.sum(1).todense()
-            probabilities += current_probabilities
-
-            log_weights.data = jnp.log(log_weights.data)
-
-            conditional_child_layers.append(conditional)
-            conditional_log_weights.append(log_weights)
-
-        if len(conditional_child_layers) == 0:
-            return self.impossible_condition_result
-
-        log_probabilities = jnp.log(probabilities)
-
-        concatenated_log_weights = bcoo_concatenate(conditional_log_weights, dimension=1).sort_indices()
-        # remove rows and columns where all weights are -inf
-        cleaned_log_weights = sparse_remove_rows_and_cols_where_all(concatenated_log_weights, -jnp.inf)
-
-        # normalize the weights
-        z = cleaned_log_weights.sum(1).todense()
-        cleaned_log_weights.data -= z[cleaned_log_weights.indices[:, 0]]
-
-        # slice the weights for each child layer
-        log_weight_slices = jnp.array([0] + [ccl.number_of_nodes for ccl in conditional_child_layers])
-        log_weight_slices = jnp.cumsum(log_weight_slices)
-        conditional_log_weights = [cleaned_log_weights[:, log_weight_slices[i]:log_weight_slices[i + 1]].sort_indices()
-                                   for i in range(len(conditional_child_layers))]
-
-        resulting_layer = SumLayer(conditional_child_layers, conditional_log_weights)
-        return resulting_layer, (log_probabilities - self.log_normalization_constants)
+        return jnp.log(result) - self.log_normalization_constants
 
     def __deepcopy__(self):
         child_layers = [child_layer.__deepcopy__() for child_layer in self.child_layers]
@@ -632,48 +415,126 @@ class SumLayer(InnerLayer):
         sum_layer = cls([cl.layer for cl in filtered_child_layers], log_weights)
         return NXConverterLayer(sum_layer, nodes, result_hash_remap)
 
-    def remove_nodes(self, remove_mask: jax.Array) -> Self:
-        new_log_weights = [lw[~remove_mask] for lw in self.log_weights]
-        return self.__class__(self.child_layers, new_log_weights)
-
-    def clean_up_orphans(self) -> Self:
-        raise NotImplementedError
-
-    def to_nx(self, variables: SortedSet[Variable], progress_bar: Optional[tqdm.tqdm] = None) -> List[
-        Unit]:
+    def to_nx(self, variables: SortedSet[Variable], result: NXProbabilisticCircuit,
+              progress_bar: Optional[tqdm.tqdm] = None) -> List[Unit]:
 
         variables_ = [variables[i] for i in self.variables]
 
         if progress_bar:
             progress_bar.set_postfix_str(f"Parsing Sum Layer for variables {variables_}")
 
-        nx_pc = NXProbabilisticCircuit()
-        units = [SumUnit() for _ in range(self.number_of_nodes)]
-        nx_pc.add_nodes_from(units)
+        units = [SumUnit(result) for _ in range(self.number_of_nodes)]
 
-        child_layer_nx = [cl.to_nx(variables, progress_bar) for cl in self.child_layers]
+        child_layer_nx = [cl.to_nx(variables, result, progress_bar) for cl in self.child_layers]
 
-        clw = self.normalized_weights
-        csc_weights = coo_matrix((clw.data, clw.indices.T), shape=clw.shape).tocsc(copy=False)
+        for log_weights, child_layer in zip(self.log_weights, child_layer_nx):
 
-        # offset for shifting through the frequencies of the node_to_child_frequency_map
-        prev_column_index = 0
-
-        for child_layer in child_layer_nx:
             # extract the weights for the child layer
-            current_weight_block: csc_array = csc_weights[:, prev_column_index:prev_column_index + len(child_layer)]
-            current_weight_block: coo_array = current_weight_block.tocoo(False)
-
-            for row, col, weight in zip(current_weight_block.row, current_weight_block.col, current_weight_block.data):
-                units[row].add_subcircuit(child_layer[col], weight)
-
+            for ((row, col), log_weight) in zip(log_weights.indices, log_weights.data):
+                units[row].add_subcircuit(child_layer[col], jnp.exp(log_weight).item(), False)
                 if progress_bar:
                     progress_bar.update()
 
-            # shift the offset
-            prev_column_index += len(child_layer)
+        [unit.normalize() for unit in units]
 
         return units
+
+class DenseSumLayer(SumLayer):
+
+
+
+    log_weights: List[jnp.array]
+    child_layers: Union[List[[ProductLayer]], List[InputLayer]]
+
+    @classmethod
+    def create_layer_from_nodes_with_same_type_and_scope(cls, nodes: List[Unit], child_layers: List[NXConverterLayer],
+                                                         progress_bar: bool = True) -> \
+            NXConverterLayer:
+        raise NotImplementedError
+
+    @property
+    def number_of_components(self) -> int:
+        return sum([cl.number_of_components for cl in self.child_layers]) + sum([math.prod(lw.shape)
+                                                                                 for lw in self.log_weights])
+
+    @classmethod
+    def nx_classes(cls) -> Tuple[Type, ...]:
+        return tuple()
+
+    @property
+    def concatenated_log_weights(self) -> jnp.array:
+        """
+        :return: The concatenated weights of the child layers for each node.
+        """
+        return jnp.concatenate(self.log_weights, axis=1)
+
+    @property
+    def log_normalization_constants(self) -> jax.Array:
+        return logsumexp(self.concatenated_log_weights, 1)
+
+    @property
+    def normalized_weights(self):
+        """
+        :return: The normalized weights of the child layers for each node.
+        """
+        return jnp.exp(self.concatenated_log_weights - self.log_normalization_constants.reshape(-1, 1))
+
+    def log_likelihood_of_nodes_single(self, x: jax.Array) -> jax.Array:
+        result = jnp.zeros(self.number_of_nodes, dtype=jnp.float32)
+
+        for log_weights, child_layer in self.log_weighted_child_layers:
+            # get the log likelihoods of the child nodes
+            child_layer_log_likelihood = child_layer.log_likelihood_of_nodes_single(x)
+
+            # weight the log likelihood of the child nodes by the weight for each node of this layer
+            log_likelihood = log_weights + child_layer_log_likelihood
+            log_likelihood = jnp.exp(logsumexp(log_likelihood, 1))
+            result += log_likelihood
+
+        return jnp.log(result) - self.log_normalization_constants
+
+    def __deepcopy__(self):
+        child_layers = [child_layer.__deepcopy__() for child_layer in self.child_layers]
+        log_weights = [jnp.copy(log_weight) for log_weight in self.log_weights]
+        return self.__class__(child_layers, log_weights)
+
+    def to_json(self) -> Dict[str, Any]:
+        result = super().to_json()
+        result["log_weights"] = [lw.tolist() for lw in self.log_weights]
+        return result
+
+    @classmethod
+    def _from_json(cls, data: Dict[str, Any]) -> Self:
+        child_layer = [Layer.from_json(child_layer) for child_layer in data["child_layers"]]
+        log_weights = [jnp.asarray(lw) for lw in data["log_weights"]]
+        return cls(child_layer, log_weights)
+
+
+    def to_nx(self, variables: SortedSet[Variable], result: NXProbabilisticCircuit,
+              progress_bar: Optional[tqdm.tqdm] = None) -> List[Unit]:
+
+        variables_ = [variables[i] for i in self.variables]
+
+        if progress_bar:
+            progress_bar.set_postfix_str(f"Parsing Dense Sum Layer for variables {variables_}")
+
+        units = [SumUnit(result) for _ in range(self.number_of_nodes)]
+
+        child_layer_nx = [cl.to_nx(variables, result, progress_bar) for cl in self.child_layers]
+
+        for log_weights, child_layer in zip(self.log_weights, child_layer_nx):
+            # extract the weights for the child layer
+            for row in range(log_weights.shape[0]):
+                for col in range(log_weights.shape[1]):
+                    units[row].add_subcircuit(child_layer[col], jnp.exp(log_weights[row, col]).item(), False)
+
+                    if progress_bar:
+                        progress_bar.update()
+
+        [unit.normalize() for unit in units]
+
+        return units
+
 
 
 class ProductLayer(InnerLayer):
@@ -681,7 +542,7 @@ class ProductLayer(InnerLayer):
     A layer that represents the product of multiple other units.
     """
 
-    child_layers: List[Union[SumLayer, InputLayer]]
+    child_layers: List[Union[SparseSumLayer, InputLayer]]
     """
     The child of a product layer is a list that contains groups sum units with the same scope or groups of input
     units with the same scope.
@@ -708,6 +569,7 @@ class ProductLayer(InnerLayer):
         """
         super().__init__(child_layers)
         self.edges = edges
+        self.variables
 
     def validate(self):
         assert self.edges.shape == (len(self.child_layers), self.number_of_nodes), \
@@ -726,13 +588,13 @@ class ProductLayer(InnerLayer):
     def number_of_components(self) -> int:
         return sum([cl.number_of_components for cl in self.child_layers]) + self.edges.nse
 
-    @cached_property
+    @Layer.variables.getter
     def variables(self) -> jax.Array:
-        child_layer_variables = jnp.concatenate([child_layer.variables for child_layer in self.child_layers])
-        max_size = child_layer_variables.shape[0]
-        unique_values = jnp.unique(child_layer_variables, size=max_size, fill_value=-1)
-        unique_values = unique_values[unique_values >= 0]
-        return unique_values.sort()
+        if self._variables is None:
+            variables = jnp.concatenate([child_layer.variables for child_layer in self.child_layers])
+            variables = jnp.unique(variables)
+            object.__setattr__(self, "_variables", variables)
+        return self._variables
 
     def log_likelihood_of_nodes_single(self, x: jax.Array) -> jax.Array:
         result = jnp.zeros(self.number_of_nodes, dtype=jnp.float32)
@@ -749,62 +611,6 @@ class ProductLayer(InnerLayer):
 
         return result
 
-    def cdf_of_nodes_single(self, x: jnp.array) -> jnp.array:
-        result = jnp.ones(self.number_of_nodes, dtype=jnp.float32)
-
-        for edges, layer in zip(self.edges, self.child_layers):
-            # calculate the cdf over the columns of the child layer
-            cdf = layer.cdf_of_nodes_single(x[layer.variables])  # shape: #child_nodes
-
-            # gather the cdf at the indices of the nodes that are required for the edges
-            cdf = cdf[edges.data]  # shape: #len(edges.values())
-
-            # multiply the gathered values by the result where the edges define the indices
-            result = result.at[edges.indices[:, 0]].mul(cdf)
-
-        return result
-
-    def probability_of_simple_event(self, event: SimpleEvent) -> jnp.array:
-        result = jnp.ones(self.number_of_nodes, dtype=jnp.float32)
-
-        for edges, layer in zip(self.edges, self.child_layers):
-            # calculate the cdf over the columns of the child layer
-            prob = layer.probability_of_simple_event(event)  # shape: #child_nodes
-
-            # gather the cdf at the indices of the nodes that are required for the edges
-            prob = prob[edges.data]  # shape: #len(edges.values())
-
-            # multiply the gathered values by the result where the edges define the indices
-            result = result.at[edges.indices[:, 0]].mul(prob)
-
-        return result
-
-    def sample_from_frequencies(self, frequencies: np.array, result: np.array, start_index=0):
-        edges_csr = coo_array((self.edges.data, self.edges.indices.T), shape=self.edges.shape).tocsr()
-        for row_index, (start, end, child_layer) in enumerate(
-                zip(edges_csr.indptr[:-1], edges_csr.indptr[1:], self.child_layers)):
-            # get the edges for the current child layer
-            row = edges_csr.data[start:end]
-            column_indices = edges_csr.indices[start:end]
-
-            frequencies_for_child_layer = np.zeros((child_layer.number_of_nodes,), dtype=np.int32)
-            frequencies_for_child_layer[row] = frequencies[column_indices]
-
-            child_layer.sample_from_frequencies(frequencies_for_child_layer, result, start_index)
-
-    def moment_of_nodes(self, order: jax.Array, center: jax.Array):
-        result = jnp.full((self.number_of_nodes, self.variables.shape[0]), jnp.nan)
-        for edges, layer in zip(self.edges, self.child_layers):
-            edges = edges.sum_duplicates(remove_zeros=False)
-
-            # calculate the moments over the columns of the child layer
-            child_layer_moment = layer.moment_of_nodes(order, center)
-
-            # gather the moments at the indices of the nodes that are required for the edges
-            result = result.at[edges.indices[:, 0], layer.variables].set(child_layer_moment[edges.data][:, 0])
-
-        return result
-
     def __deepcopy__(self):
         child_layers = [child_layer.__deepcopy__() for child_layer in self.child_layers]
         edges = copy_bcoo(self.edges)
@@ -814,102 +620,6 @@ class ProductLayer(InnerLayer):
         result = super().to_json()
         result["edges"] = (self.edges.data.tolist(), self.edges.indices.tolist(), self.edges.shape)
         return result
-
-    def log_conditional_of_simple_event(self, event: SimpleEvent, ) -> Tuple[Optional[Self], jax.Array]:
-
-        # initialize the conditional child layers and the log probabilities
-        log_probabilities = jnp.zeros(self.number_of_nodes, dtype=jnp.float32)
-        conditional_child_layers = []
-        remapped_edges = []
-
-        # for edge bundle and child layer
-        for index, (edges, child_layer) in enumerate(zip(self.edges, self.child_layers)):
-            edges: BCOO
-            edges = edges.sum_duplicates(remove_zeros=False)
-
-            # condition the child layer
-            conditional, child_log_prob = child_layer.log_conditional_of_simple_event(event)
-
-            # if it is entirely impossible, this layer also is
-            if conditional is None:
-                continue
-
-            # update the log probabilities and child layers
-            log_probabilities = log_probabilities.at[edges.indices[:, 0]].add(child_log_prob[edges.data])
-            conditional_child_layers.append(conditional)
-
-            # create the remapping of the node indices. nan indicates the node got deleted
-            # enumerate the indices of the conditional child layer nodes
-            new_node_indices = jnp.arange(conditional.number_of_nodes)
-
-            # initialize the remapping of the child layer node indices
-            layer_remap = jnp.full((child_layer.number_of_nodes,), jnp.nan, dtype=jnp.float32)
-            layer_remap = layer_remap.at[child_log_prob > -jnp.inf].set(new_node_indices)
-
-            # update the edges
-            remapped_child_edges = layer_remap[edges.data]
-            valid_edges = ~jnp.isnan(remapped_child_edges)
-
-            # create new indices for the edges
-            new_indices = edges.indices[valid_edges]
-            new_indices = jnp.concatenate([jnp.zeros((len(new_indices), 1), dtype=jnp.int32), new_indices],
-                                          axis=1)
-
-            new_edges = BCOO((remapped_child_edges[valid_edges].astype(jnp.int32),
-                              new_indices),
-                             shape=(1, self.number_of_nodes), indices_sorted=True,
-                             unique_indices=True)
-            remapped_edges.append(new_edges)
-
-        remapped_edges = bcoo_concatenate(remapped_edges, dimension=0).sort_indices()
-
-        # get nodes that should be removed as boolean mask
-        remove_mask = log_probabilities == -jnp.inf  # shape (#nodes, )
-        keep_mask = ~remove_mask
-
-        # remove the nodes that have -inf log probabilities from remapped_edges
-        remapped_edges = coo_array((remapped_edges.data, remapped_edges.indices.T), shape=remapped_edges.shape).tocsc()
-        remapped_edges = remapped_edges[:, keep_mask].tocoo()
-        remapped_edges = BCOO((remapped_edges.data, jnp.stack((remapped_edges.row, remapped_edges.col)).T),
-                              shape=remapped_edges.shape, indices_sorted=True, unique_indices=True)
-
-        # construct result and clean it up
-        result = self.__class__(conditional_child_layers, remapped_edges)
-        result = result.clean_up_orphans()
-        return result, log_probabilities
-
-    def clean_up_orphans(self):
-        """
-        Clean up the layer by removing orphans in the child layers.
-        """
-        new_child_layers = []
-
-        for index, (edges, child_layer) in enumerate(zip(self.edges, self.child_layers)):
-            edges: BCOO
-            edges = edges.sum_duplicates(remove_zeros=False)
-            # mask rather nodes have parent edges or not
-            orphans = jnp.ones(child_layer.number_of_nodes, dtype=jnp.bool)
-
-            # mark nodes that have parents with False
-            data = edges.data
-            if len(data) > 0:
-                orphans = orphans.at[data].set(False)
-
-            # if orphans exist
-            if orphans.any():
-                # remove them from the child layer
-                child_layer = child_layer.remove_nodes(orphans)
-            new_child_layers.append(child_layer)
-
-        # compress edges
-        shrunken_indices = shrink_index_array(self.edges.indices)
-        new_edges = BCOO((self.edges.data, shrunken_indices), shape=self.edges.shape, indices_sorted=True,
-                         unique_indices=True)
-        return self.__class__(new_child_layers, new_edges)
-
-    def remove_nodes(self, remove_mask: jax.Array) -> Self:
-        new_edges = self.edges[:, ~remove_mask]
-        return self.__class__(self.child_layers, new_edges)
 
     @classmethod
     def _from_json(cls, data: Dict[str, Any]) -> Self:
@@ -955,21 +665,22 @@ class ProductLayer(InnerLayer):
         layer = cls([cl.layer for cl in child_layers], edges)
         return NXConverterLayer(layer, nodes, hash_remap)
 
-    def to_nx(self, variables: SortedSet[Variable], progress_bar: Optional[tqdm.tqdm] = None) -> List[
-        Unit]:
+    def to_nx(self, variables: SortedSet[Variable], result: NXProbabilisticCircuit,
+              progress_bar: Optional[tqdm.tqdm] = None) -> List[Unit]:
+
+        if result is None:
+            result = NXProbabilisticCircuit()
 
         variables_ = [variables[i] for i in self.variables]
         if progress_bar:
             progress_bar.set_postfix_str(f"Parsing Product Layer of variables {variables_}")
 
-        nx_pc = NXProbabilisticCircuit()
-        units = [ProductUnit() for _ in range(self.number_of_nodes)]
-        nx_pc.add_nodes_from(units)
+        units = [ProductUnit(result) for _ in range(self.number_of_nodes)]
 
-        child_layer_nx = [cl.to_nx(variables, progress_bar) for cl in self.child_layers]
-
+        child_layer_nx = [cl.to_nx(variables, result, progress_bar) for cl in self.child_layers]
         for (row, col), data in zip(self.edges.indices, self.edges.data):
-            units[col].add_subcircuit(child_layer_nx[row][data])
+            units[col].add_subcircuit(child_layer_nx[row][data], mount=False)
+
             if progress_bar:
                 progress_bar.update()
 
