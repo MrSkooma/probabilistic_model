@@ -208,21 +208,21 @@ class ProbabilisticModel(abc.ABC):
         raise NotImplementedError
 
     def moment(self, order: OrderType, center: CenterType) -> MomentType:
-        """
-        Calculate the (centralized) moment of the distribution.
-
-        .. math::
-
-            \int_{-\infty}^{\infty} (x - center)^{order} pdf(x) dx
-
-        .. Note:: You can read more about queries of this class in Definition 22 in :cite:p:`choi2020probabilistic`_.
-            :cite:p:`youtube2020probabilistic`
-
-
-        :param order: The orders of the moment as a variable map for every continuous and integer variable.
-        :param center: The center of the moment as a variable map for every continuous and integer variable.
-        :return: The moments of the variables in `order`.
-        """
+        # """
+        # Calculate the (centralized) moment of the distribution.
+        #
+        # .. math::
+        #
+        #     \int_{-\infty}^{\infty} (x - center)^{order} pdf(x) dx
+        #
+        # .. Note:: You can read more about queries of this class in Definition 22 in :cite:p:`choi2020probabilistic`_.
+        #     :cite:p:`youtube2020probabilistic`
+        #
+        #
+        # :param order: The orders of the moment as a variable map for every continuous and integer variable.
+        # :param center: The center of the moment as a variable map for every continuous and integer variable.
+        # :return: The moments of the variables in `order`.
+        # """
         raise NotImplementedError
 
     def expectation(self, variables: Optional[Iterable[Variable]] = None) -> MomentType:

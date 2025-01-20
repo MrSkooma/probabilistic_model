@@ -786,6 +786,37 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
                     unit: InnerUnit
                     unit.log_forward()  # Synch trheads 1
         return self.root.result_of_current_query
+       #
+        # from multiprocessing import Pool, shared_memory
+        # from functools import partial
+        #
+        # # make self a shared memory object
+        # # good luck with that
+        #
+        # variable_to_index_map = self.variable_to_index_map
+        # static_data = {"variable_to_index_map": variable_to_index_map, "events": events}
+        # for layer in reversed(self.layers):
+        #     # print([type(a) for a in layer])
+        #     # print(events)
+        #     if len(layer) == 0:
+        #         continue
+        #
+        #     with Pool() as pool:
+        #         func = partial(self.python_cant_pickle_lambda, variable_to_index_map=variable_to_index_map, events=events)
+        #         pool.map(func, layer)
+        #     print([node.result_of_current_query for node in layer])
+        # return self.root.result_of_current_query
+
+    def python_cant_pickle_lambda(self, unit, variable_to_index_map, events):
+        # variable_to_index_map = static_data["variable_to_index_map"]
+        # events = static_data["events"]
+        if unit.is_leaf:
+            unit: LeafUnit
+            unit.log_likelihood(events[:, [variable_to_index_map[variable] for variable in unit.variables]])
+        else:
+            unit: InnerUnit
+            unit.log_forward()
+
 
     def cdf(self, events: np.array) -> np.array:
         variable_to_index_map = self.variable_to_index_map
