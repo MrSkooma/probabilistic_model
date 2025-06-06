@@ -1,9 +1,9 @@
-random-events
+random-events>=4.1.2
 networkx
 plotly
 scipy
 typing_extensions
-numpy<=1.26.4
+numpy
 sortedcontainers
 tqdm
 tabulate

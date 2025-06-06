@@ -50,7 +50,7 @@ f_n(x)  & \text{n is an input node,}\\
 where $f_n(x)$ is an univariate input distribution (e.g., Gaussian, Categorical), and $\theta_{n,c}$ denotes the 
 parameter corresponding to edge $(n, c)$. 
 Intuitively, sum nodes model mixtures of their input distributions, which require the mixture
-weights to be in the probability simplex: $\sum_{c \in ch(n)} \theta_{n,c} = 1$
+log_weights to be in the probability simplex: $\sum_{c \in ch(n)} \theta_{n,c} = 1$
 and $\forall c \in ch(n), \theta_{n,c} \geq 0$. 
 And product nodes build factorized distributions over their inputs. 
 The size of a PC, denoted $|p|$, is the number of edges in its DAG. {cite}`liu2024scaling`
@@ -211,6 +211,7 @@ import plotly.graph_objects as go
 from probabilistic_model.distributions import *
 from probabilistic_model.probabilistic_circuit.nx.distributions import *
 from probabilistic_model.probabilistic_circuit.nx.probabilistic_circuit import *
+from probabilistic_model.probabilistic_circuit.nx.helper import leaf
 import numpy as np
 
 ```
@@ -220,8 +221,8 @@ import numpy as np
 x = Continuous("X")
 
 model = SumUnit()
-model.add_subcircuit(UnivariateContinuousLeaf(GaussianDistribution(x, 0, 0.5)), 0.1)
-model.add_subcircuit(UnivariateContinuousLeaf(GaussianDistribution(x, 1, 2)), 0.9)
+model.add_subcircuit(leaf(GaussianDistribution(x, 0, 0.5)), np.log(0.1))
+model.add_subcircuit(leaf(GaussianDistribution(x, 1, 2)), np.log(0.9))
 model = model.probabilistic_circuit
 
 wrong_mode, wrong_max_likelihood = model.root.subcircuits[1].distribution.mode()
@@ -241,8 +242,8 @@ The next figure shows that if we truncated the children of the sum node to a dis
 
 ```{code-cell} ipython3
 model = SumUnit()
-model.add_subcircuit(UnivariateContinuousLeaf(TruncatedGaussianDistribution(x, open_closed(-np.inf, 0.5).simple_sets[0], 0, 0.5)), 0.1)
-model.add_subcircuit(UnivariateContinuousLeaf(TruncatedGaussianDistribution(x, open(0.5, np.inf).simple_sets[0], 1, 2)), 0.9)
+model.add_subcircuit(leaf(TruncatedGaussianDistribution(x, open_closed(-np.inf, 0.5).simple_sets[0], 0, 0.5)), np.log(0.1))
+model.add_subcircuit(leaf(TruncatedGaussianDistribution(x, open(0.5, np.inf).simple_sets[0], 1, 2)), np.log(0.9))
 model = model.probabilistic_circuit
 fig = go.Figure(model.plot(), model.plotly_layout())
 fig.show()

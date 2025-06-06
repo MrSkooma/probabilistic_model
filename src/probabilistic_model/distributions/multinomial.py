@@ -2,13 +2,12 @@ import itertools
 
 import numpy as np
 from random_events.product_algebra import SimpleEvent, Event
+from random_events.utils import SubclassJSONSerializer
 from random_events.variable import Symbolic, Variable
 from typing_extensions import Self, Any, Iterable, List, Optional, Tuple, Dict
 
-from ..probabilistic_circuit.nx.distributions.distributions import SymbolicDistribution, UnivariateDiscreteLeaf
-from ..probabilistic_circuit.nx.probabilistic_circuit import (ProductUnit, SumUnit)
+from ..probabilistic_circuit.nx.probabilistic_circuit import SymbolicDistribution, UnivariateDiscreteLeaf, ProductUnit, SumUnit
 from ..probabilistic_model import ProbabilisticModel
-from random_events.utils import SubclassJSONSerializer
 from ..utils import MissingDict
 
 
@@ -71,16 +70,24 @@ class MultinomialDistribution(ProbabilisticModel, SubclassJSONSerializer):
         likelihood = np.max(self.probabilities)
         indices_of_maximum = np.transpose(np.asarray(self.probabilities == likelihood).nonzero())
 
+        hash_map_variable_values = {variable: list(variable.domain.hash_map.values()) for variable in self.variables}
+
         mode = None
         for index_of_maximum in indices_of_maximum:
-            current_mode = SimpleEvent({variable: variable.domain.simple_sets[0].all_elements(value) for
+
+            current_mode = SimpleEvent({variable: hash_map_variable_values[variable][value] for
                                         variable, value in zip(self.variables, index_of_maximum)}).as_composite_set()
             if mode is None:
                 mode = current_mode
             else:
                 mode |= current_mode
 
-        return mode.simplify(), np.log(likelihood)
+        return mode, np.log(likelihood)
+
+    def log_conditional_of_point(self, point: Dict[Variable, Any]) -> Tuple[Optional[Self], float]:
+        event = SimpleEvent(point)
+        event.fill_missing_variables(self.variables)
+        return self.log_conditional(event.as_composite_set())
 
     def __copy__(self) -> Self:
         """
@@ -108,13 +115,13 @@ class MultinomialDistribution(ProbabilisticModel, SubclassJSONSerializer):
         """
         columns = [[var.name for var in self.variables] + ["P"]]
         events = list(list(event) for event in itertools.product(
-            *[[simple_set.name for simple_set in var.domain.simple_sets] for var in self.variables]))
+            *[[simple_set.element for simple_set in var.domain.simple_sets] for var in self.variables]))
         events = np.concatenate((events, self.probabilities.reshape(-1, 1)), axis=1).tolist()
         table = columns + events
         return table
 
     def probability_of_simple_event(self, event: SimpleEvent) -> float:
-        indices = tuple(list(event[variable].simple_sets) for variable in self.variables)
+        indices = self.indices_from_simple_event(event)
         return self.probabilities[np.ix_(*indices)].sum()
 
     def log_likelihood(self, events: np.array) -> np.array:
@@ -134,14 +141,25 @@ class MultinomialDistribution(ProbabilisticModel, SubclassJSONSerializer):
         result.normalize()
         return result, np.log(sum_of_probabilities)
 
+    def indices_from_simple_event(self, event: SimpleEvent) -> Tuple[List[int], ...]:
+        """
+        Calculate the indices that can be used to access the underlying probability array from a simple event.
+
+        :param event: The simple event.
+        :return: The indices.
+        """
+        hash_map_variable_keys = {variable: list(variable.domain.hash_map) for variable in self.variables}
+        return tuple([hash_map_variable_keys[variable].index(hash(simple_set))
+                      for simple_set in event[variable]] for variable in self.variables)
+
     def probabilities_from_simple_event(self, event: SimpleEvent) -> np.ndarray:
         """
         Calculate the probabilities array for a simple event.
+
         :param event: The simple event.
         :return: The array of probabilities that apply to this event.
         """
-        indices = tuple(list(event[variable].simple_sets) for variable in self.variables)
-        indices = np.ix_(*indices)
+        indices = np.ix_(*self.indices_from_simple_event(event))
         probabilities = np.zeros_like(self.probabilities)
         probabilities[indices] = self.probabilities[indices]
         return probabilities
@@ -164,17 +182,17 @@ class MultinomialDistribution(ProbabilisticModel, SubclassJSONSerializer):
         result = SumUnit()
 
         # iterate through all states of this distribution
-        for event in itertools.product(*[variable.domain.simple_sets for variable in self.variables]):
+        for event in itertools.product(*[list(range(len(variable.domain.simple_sets)))
+                                         for variable in self.variables]):
 
             # create a product unit for the current state
             product_unit = ProductUnit()
 
             # iterate through all variables
             for variable, value in zip(self.variables, event):
-
                 # create probabilities for the current variables state as one hot encoding
                 weights = MissingDict(float)
-                weights[int(value)] = 1.
+                weights[hash(value)] = 1.
 
                 # create a distribution for the current variable
                 distribution = SymbolicDistribution(variable, weights)
@@ -186,7 +204,7 @@ class MultinomialDistribution(ProbabilisticModel, SubclassJSONSerializer):
             probability = self.likelihood(np.array([event]))[0]
 
             # mount the product unit to the result
-            result.add_subcircuit(product_unit, probability)
+            result.add_subcircuit(product_unit, np.log(probability))
 
         return result
 

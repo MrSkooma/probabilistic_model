@@ -1,6 +1,8 @@
+from enum import IntEnum
+
 import numpy as np
 import pandas as pd
-from random_events.set import SetElement
+from random_events.set import SetElement, Set
 from random_events.variable import Variable, Continuous as REContinuous, Integer as REInteger, Symbolic
 from typing_extensions import Self, List, Any, Dict
 
@@ -25,7 +27,7 @@ def infer_variables_from_dataframe(data: pd.DataFrame, scale_continuous_types: b
         unique_values = data[column].unique()
 
         # handle continuous variables
-        if datatype in [float]:
+        if np.issubdtype(datatype, np.number) and datatype != int:
 
             if len(unique_values) == 1:
                 minimal_distance_between_values = 1.
@@ -52,11 +54,9 @@ def infer_variables_from_dataframe(data: pd.DataFrame, scale_continuous_types: b
                 variable = Integer(column, mean, std)
             elif datatype == object:
                 unique_values = data[column].unique()
-                unique_values.sort()
-                enum_elements = {"EMPTY_SET": -1}
-                enum_elements.update({unique_value: index for index, unique_value in enumerate(unique_values)})
-                domain = SetElement(column, enum_elements)
-                variable = Symbolic(column, domain)
+                # unique_values.sort()
+                # enum = IntEnum(column, {value: index for index, value in enumerate(unique_values)})
+                variable = Symbolic(column, Set.from_iterable(unique_values))
             else:
                 raise ValueError(f"Datatype {datatype} of column {column} is not supported.")
 

@@ -110,8 +110,8 @@ $$
 
 
 The likelihood of such a split is given by assuming a uniform distribution on the left and right side of the split. 
-This constructs a deterministic mixture of uniform distributions where the weights are given by the relative sum of 
-weights on the left and right side of the split.
+This constructs a deterministic mixture of uniform distributions where the log_weights are given by the relative sum of 
+log_weights on the left and right side of the split.
 
 \begin{align*}
 w_{total} &= \sum_{i=1}^N w_i \\
@@ -180,7 +180,7 @@ This algorithm is implemented in the [NygaDistribution](https://probabilistic-mo
 
 # Theory Example
 
-Consider the dataset $\mathcal{D} = \{ 1, 2, 3, 4, 7, 9 \}$ with uniform weights, i.e., $w_i = 1, \forall i$.
+Consider the dataset $\mathcal{D} = \{ 1, 2, 3, 4, 7, 9 \}$ with uniform log_weights, i.e., $w_i = 1, \forall i$.
 
 The log likelihood of a uniform distribution without a split over $\mathcal{D}$ is given by
 
@@ -282,13 +282,14 @@ Comparing this to the gaussian distribution we sampled from, we can see that the
 ```{code-cell} ipython3
 from probabilistic_model.distributions import GaussianDistribution
 from probabilistic_model.probabilistic_circuit.nx.distributions import *
+from probabilistic_model.probabilistic_circuit.nx.helper import leaf
 from probabilistic_model.probabilistic_circuit.nx.probabilistic_circuit import SumUnit
 
-gaussian_1 = UnivariateContinuousLeaf(GaussianDistribution(Continuous("x"), 0, 1))
-gaussian_2 = UnivariateContinuousLeaf(GaussianDistribution(Continuous("x"), 5, 0.5))
+gaussian_1 = leaf(GaussianDistribution(Continuous("x"), 0, 1))
+gaussian_2 = leaf(GaussianDistribution(Continuous("x"), 5, 0.5))
 mixture = SumUnit()
-mixture.add_subcircuit(gaussian_1, 0.5)
-mixture.add_subcircuit(gaussian_2, 0.5)
+mixture.add_subcircuit(gaussian_1, np.log(0.5))
+mixture.add_subcircuit(gaussian_2, np.log(0.5))
 mixture = mixture.probabilistic_circuit
 fig.add_traces(mixture.plot())
 ```

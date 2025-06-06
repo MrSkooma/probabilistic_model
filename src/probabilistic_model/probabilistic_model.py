@@ -115,8 +115,7 @@ class ProbabilisticModel(abc.ABC):
         :param event: The event.
         :return: The probability of the event.
         """
-        for simple_event in event.simple_sets:
-            simple_event.fill_missing_variables(self.variables)
+        event.fill_missing_variables(set(self.variables))
         return sum(self.probability_of_simple_event(simple_set) for simple_set in event.simple_sets)
 
     @abstractmethod
@@ -180,8 +179,7 @@ class ProbabilisticModel(abc.ABC):
         :param event: The event to condition on.
         :return: The conditional distribution and the probability of the event.
         """
-        for simple_event in event.simple_sets:
-            simple_event.fill_missing_variables(self.variables)
+        event.fill_missing_variables(set(self.variables))
         conditional, log_probability = self.log_conditional(event)
         return conditional, np.exp(log_probability)
 
@@ -194,6 +192,27 @@ class ProbabilisticModel(abc.ABC):
 
         :param event: The event to condition on.
         :return: The conditional distribution and the log-probability of the event.
+        """
+        raise NotImplementedError
+
+    def conditional_of_point(self, point: Dict[Variable, Any]) -> Tuple[Optional[Self], float]:
+        """
+        Calculate the conditional distribution P(*| point) and the probability of the event.
+
+        :param point: A partial point to calculate the conditional distribution on.
+        :return: The conditional distribution and the log-probability of the point.
+        """
+        conditional, log_probability = self.log_conditional_of_point(point)
+        return conditional, np.exp(log_probability)
+
+    @abstractmethod
+    def log_conditional_of_point(self, point: Dict[Variable, Any]) -> Tuple[Optional[Self], float]:
+        """
+        Calculate the conditional distribution P(*| point) and the probability of the event.
+        Check the documentation of `conditional_of_point` for more information.
+
+        :param point: A partial point to calculate the conditional distribution on.
+        :return: The conditional distribution and the log-probability of the point.
         """
         raise NotImplementedError
 
@@ -260,6 +279,28 @@ class ProbabilisticModel(abc.ABC):
         :return: A simple event that contains every possible value.
         """
         return SimpleEvent({variable: variable.domain for variable in self.variables})
+
+    def translate(self, translation: Dict[Variable, float]):
+        """
+        Translate the model in-place.
+        Translation is done by adding the translation to the variable location influencing values.
+        The translation can be viewed as what happens
+        when you shift the numeric variables of the model by a constant vector.
+
+        :param translation: The variable value pairs to translate the model by.
+        """
+        raise NotImplementedError
+
+    def scale(self, scaling: Dict[Variable, float]):
+        """
+        Scale the model in-place.
+        Scaling is done by multiplying the variable location influencing values.
+        The scaling can be viewed as what happens
+        when you multiply the numeric variables of the model by a constant vector.
+
+        :param scaling: The variable value pairs to scale the model by.
+        """
+        ...
 
     def __copy__(self):
         raise NotImplementedError
@@ -328,7 +369,7 @@ class ProbabilisticModel(abc.ABC):
         variable: Symbolic = self.variables[0]
 
         # calculate probabilities of every element in the domain
-        probabilities = {element.name: self.probability_of_simple_event(SimpleEvent({variable: element})) for element in
+        probabilities = {str(element): self.probability_of_simple_event(SimpleEvent({variable: element})) for element in
                          variable.domain}
 
         maximum = max(probabilities.values())

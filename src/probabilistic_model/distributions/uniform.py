@@ -26,9 +26,19 @@ class UniformDistribution(ContinuousDistributionWithFiniteSupport):
     def univariate_log_mode(self) -> Tuple[AbstractCompositeSet, float]:
         return self.interval.as_composite_set(), self.log_pdf_value()
 
-    def log_conditional_from_non_singleton_simple_interval(self, interval: SimpleInterval) -> Tuple[Self, float]:
+    def log_conditional_from_simple_interval(self, interval: SimpleInterval) -> Tuple[Self, float]:
         probability = self.probability_of_simple_event(SimpleEvent({self.variable: interval}))
-        return self.__class__(self.variable, interval), np.log(probability)
+
+        if probability == 0.0:
+            return None, -np.inf
+
+        # construct new interval
+        new_interval = self.interval.intersection_with(interval)
+
+        if new_interval.is_empty():
+            return None, -np.inf
+
+        return self.__class__(self.variable, new_interval), np.log(probability)
 
     def sample(self, amount: int) -> np.array:
         return np.random.uniform(self.lower, self.upper, (amount, 1))
@@ -132,14 +142,3 @@ class UniformDistribution(ContinuousDistributionWithFiniteSupport):
 
     def __hash__(self):
         return hash((self.variable.name, hash(self.interval)))
-
-
-    def all_union_of_mixture_points_with(self, other: Self):
-        """
-        Computes all possible union intervals of mixture points when combining two intervals.
-
-        Returns: list of closed intervals representing all mixture points between distributions
-        """
-        points = SortedSet([self.interval.lower, self.interval.upper, other.interval.lower, other.interval.upper])
-        result = [closed(lower, upper) for lower, upper in zip(points[:-1], points[1:])]
-        return result

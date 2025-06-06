@@ -54,7 +54,12 @@ class UniformDistributionTestCase(unittest.TestCase):
     def test_conditional_singleton_intersection(self):
         event = SimpleEvent({self.distribution.variable: singleton(1)}).as_composite_set()
         conditional, probability = self.distribution.conditional(event)
-        self.assertEqual(conditional, DiracDeltaDistribution(self.x, 1, 0.5))
+        self.assertIsNone(conditional)
+        self.assertEqual(probability, 0.)
+
+        point = {self.distribution.variable: 1.}
+        conditional, probability = self.distribution.conditional_of_point(point)
+        self.assertIsInstance(conditional, DiracDeltaDistribution)
         self.assertEqual(probability, 0.5)
 
     def test_conditional_simple_intersection(self):
@@ -81,3 +86,9 @@ class UniformDistributionTestCase(unittest.TestCase):
         self.assertEqual(distribution.variable, Continuous("x"))
         distribution.variable = Continuous("y")
         self.assertEqual(distribution.variable, Continuous("y"))
+
+    def test_translation(self):
+        distribution = UniformDistribution(self.x, SimpleInterval(0, 1))
+        distribution.translate({self.x: 2.})
+        expected_distribution = UniformDistribution(self.x, SimpleInterval(2, 3))
+        self.assertEqual(distribution, expected_distribution)

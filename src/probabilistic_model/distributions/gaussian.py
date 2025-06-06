@@ -91,10 +91,11 @@ class GaussianDistribution(ContinuousDistribution):
 
         return VariableMap({self.variable: moment})
 
-    def log_conditional_from_non_singleton_simple_interval(self, interval: SimpleInterval) -> (
-            Tuple)[TruncatedGaussianDistribution, float]:
+    def log_conditional_from_simple_interval(self, interval: SimpleInterval) -> Tuple[Optional[TruncatedGaussianDistribution], float]:
         cdf_values = self.cdf(simple_interval_as_array(interval).reshape(-1, 1))
         probability = cdf_values[1] - cdf_values[0]
+        if probability <= 0.0:
+            return None, -np.inf
         return TruncatedGaussianDistribution(self.variable, interval, self.location, self.scale), np.log(probability)
 
     def __eq__(self, other: Self):
@@ -122,6 +123,12 @@ class GaussianDistribution(ContinuousDistribution):
     def abbreviated_symbol(self) -> str:
         return "N"
 
+    def translate(self, translation: VariableMap[Variable, float]):
+        self.location += translation[self.variable]
+
+    def scale(self, scaling: VariableMap[Variable, float]):
+        self.location *= scaling[self.variable]
+        self.scale *= scaling[self.variable]
 
 class TruncatedGaussianDistribution(ContinuousDistributionWithFiniteSupport, GaussianDistribution):
     """
@@ -353,3 +360,11 @@ class TruncatedGaussianDistribution(ContinuousDistributionWithFiniteSupport, Gau
         if self.upper == np.inf and self.lower == -np.inf:
             return super().sample(amount)
         return self.robert_rejection_sample(amount).reshape(-1, 1)
+
+    def translate(self, translation: VariableMap[Variable, float]):
+        super().translate(translation)
+        GaussianDistribution.translate(self, translation)
+
+    def scale(self, scale: VariableMap[Variable, float]):
+        super().scale(scale)
+        GaussianDistribution.scale(self, scale)

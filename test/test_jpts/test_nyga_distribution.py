@@ -4,13 +4,14 @@ import numpy as np
 import plotly.graph_objects as go
 from numpy import testing
 from random_events.interval import closed, closed_open
-from random_events.variable import Continuous
-
-from probabilistic_model.learning.nyga_distribution import NygaDistribution, InductionStep
-from probabilistic_model.distributions import UniformDistribution, DiracDeltaDistribution
-from probabilistic_model.probabilistic_circuit.nx.distributions import UnivariateContinuousLeaf
-from probabilistic_model.probabilistic_circuit.nx.probabilistic_circuit import ProbabilisticCircuit, SumUnit
 from random_events.utils import SubclassJSONSerializer
+from random_events.variable import Continuous
+from scipy.special import logsumexp
+
+from probabilistic_model.distributions import UniformDistribution, DiracDeltaDistribution
+from probabilistic_model.learning.nyga_distribution import NygaDistribution, InductionStep
+from probabilistic_model.probabilistic_circuit.nx.probabilistic_circuit import SumUnit, \
+    UnivariateContinuousLeaf, leaf
 
 
 class InductionStepTestCase(unittest.TestCase):
@@ -133,7 +134,7 @@ class InductionStepTestCase(unittest.TestCase):
         distribution.fit(data)
         self.assertLessEqual(len(distribution.root.subcircuits),
                              int(len(data) / self.induction_step.nyga_distribution.min_samples_per_quantile))
-        self.assertAlmostEqual(sum(distribution.root.weights), 1.)
+        self.assertAlmostEqual(logsumexp(distribution.root.log_weights), 0.)
 
     def test_domain(self):
         np.random.seed(69)
@@ -142,7 +143,12 @@ class InductionStepTestCase(unittest.TestCase):
         distribution.fit(data)
         domain = distribution.support
         self.assertEqual(len(domain.simple_sets), 1)
-        self.assertEqual(domain.simple_sets[0][self.variable], closed(min(data), max(data)))
+
+        lowest = min(data)
+        highest = max(data)
+
+        self.assertAlmostEqual(domain.simple_sets[0][self.variable].simple_sets[0].lower, lowest, delta=10e-5)
+        self.assertAlmostEqual(domain.simple_sets[0][self.variable].simple_sets[-1].upper, highest, delta=10e-5)
 
     def test_plot(self):
         np.random.seed(69)
@@ -171,11 +177,11 @@ class InductionStepTestCase(unittest.TestCase):
         self.assertEqual(distribution.root, deserialized.root)
 
     def test_from_mixture_of_uniform_distributions(self):
-        u1 = UnivariateContinuousLeaf(UniformDistribution(self.variable, closed(0, 5).simple_sets[0]))
-        u2 = UnivariateContinuousLeaf(UniformDistribution(self.variable, closed(2, 3).simple_sets[0]))
+        u1 = leaf(UniformDistribution(self.variable, closed(0, 5).simple_sets[0]))
+        u2 = leaf(UniformDistribution(self.variable, closed(2, 3).simple_sets[0]))
         sum_unit = SumUnit()
-        sum_unit.add_subcircuit(u1, 0.5)
-        sum_unit.add_subcircuit(u2, 0.5)
+        sum_unit.add_subcircuit(u1, np.log(0.5))
+        sum_unit.add_subcircuit(u2, np.log(0.5))
         distribution = NygaDistribution.from_uniform_mixture(sum_unit.probabilistic_circuit)
 
         solution_by_hand = NygaDistribution(self.variable)
@@ -184,9 +190,9 @@ class InductionStepTestCase(unittest.TestCase):
         leaf_2 = UniformDistribution(self.variable, closed_open(2, 3).simple_sets[0])
         leaf_3 = UniformDistribution(self.variable, closed(3, 5).simple_sets[0])
 
-        root_of_solution.add_subcircuit(UnivariateContinuousLeaf(leaf_1), 0.2)
-        root_of_solution.add_subcircuit(UnivariateContinuousLeaf(leaf_2), 0.6)
-        root_of_solution.add_subcircuit(UnivariateContinuousLeaf(leaf_3), 0.2)
+        root_of_solution.add_subcircuit(UnivariateContinuousLeaf(leaf_1), np.log(0.2))
+        root_of_solution.add_subcircuit(UnivariateContinuousLeaf(leaf_2), np.log(0.6))
+        root_of_solution.add_subcircuit(UnivariateContinuousLeaf(leaf_3), np.log(0.2))
 
         self.assertEqual(len(distribution.leaves), 3)
         self.assertEqual(distribution.root, solution_by_hand.root)
@@ -198,8 +204,10 @@ class FittedNygaDistributionTestCase(unittest.TestCase):
     data: np.array
 
     def setUp(self) -> None:
+        np.random.seed(420)
         self.model = NygaDistribution(self.x, min_likelihood_improvement=0.001, min_samples_per_quantile=300)
-        data = np.random.normal(0, 1, 1000)
+        data = np.random.normal(0., 1., 1000).astype(np.float32)
+        data.sort()
         self.model.fit(data)
         self.data = data
 
@@ -213,7 +221,7 @@ class FittedNygaDistributionTestCase(unittest.TestCase):
 
     def test_likelihood(self):
         likelihood = self.model.log_likelihood(self.data.reshape(-1, 1))
-        self.assertEqual(likelihood.shape, (1000, ))
+        self.assertEqual(likelihood.shape, (1000,))
         self.assertGreater(likelihood.min(), -np.inf)
 
 
