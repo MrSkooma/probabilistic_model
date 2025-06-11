@@ -5,6 +5,7 @@ import math
 import queue
 import random
 from abc import abstractmethod
+from collections import deque, defaultdict
 from enum import IntEnum
 
 import networkx as nx
@@ -144,7 +145,7 @@ class Unit(SubclassJSONSerializer, DrawIOInterface):
     @property
     def impossible_condition_result(self) -> Tuple[Optional[Unit], float]:
         """
-        :return: The result of an impossible conditional query.
+        :return: The result of an impossible truncated query.
         """
         return None, -np.inf
 
@@ -260,8 +261,8 @@ class LeafUnit(Unit):
         if self.distribution is None:
             self.probabilistic_circuit.remove_node(self)
 
-    def log_conditional_of_simple_event_in_place(self, event: SimpleEvent):
-        self.distribution, self.result_of_current_query = self.distribution.log_conditional(event.as_composite_set())
+    def log_truncated_of_simple_event_in_place(self, event: SimpleEvent):
+        self.distribution, self.result_of_current_query = self.distribution.log_truncated(event.as_composite_set())
 
     def __copy__(self):
         return self.__class__(self.distribution.__copy__())
@@ -305,9 +306,9 @@ class LeafUnit(Unit):
         distribution = SubclassJSONSerializer.from_json(data["distribution"])
         return cls(distribution)
 
-    def log_conditional_of_point_in_place(self, point: Dict[Variable, Any]):
+    def log_conditional_in_place(self, point: Dict[Variable, Any]):
         if any(variable for variable in self.variables if variable in point):
-            self.distribution, self.result_of_current_query = self.distribution.log_conditional_of_point(point)
+            self.distribution, self.result_of_current_query = self.distribution.log_conditional(point)
         else:
             self.result_of_current_query = 0.
 
@@ -416,6 +417,15 @@ class SumUnit(InnerUnit):
         result = [lw + s.result_of_current_query for lw, s in self.log_weighted_subcircuits]
         self.result_of_current_query = logsumexp(result, axis=0)
     moment = forward
+
+    def log_forward_conditioning(self, *args, **kwargs):
+        result = [lw + s.result_of_current_query for lw, s in self.log_weighted_subcircuits]
+
+        # update weights according to bayes rule
+        for new_weight, subcircuit in zip(result, self.subcircuits):
+            self.probabilistic_circuit.add_edge(self, subcircuit, log_weight=new_weight)
+
+        self.result_of_current_query = logsumexp(result, axis=0)
 
     def support(self):
         support = self.subcircuits[0].result_of_current_query.__deepcopy__()
@@ -527,7 +537,7 @@ class SumUnit(InnerUnit):
                 if p_query == 0:
                     continue
 
-                # calculate conditional probability
+                # calculate truncated probability
                 weight = p_query / p_condition
 
                 # create edge from proxy to subcircuit
@@ -747,9 +757,83 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
     The outgoing edges of a sum unit contain the log-log_weights of the subcircuits.
     """
 
+    _cached_nodes: List[Unit]
+    """
+    Cached list of all nodes
+    """
+
+    _cached_unweighted_edges: List[Tuple[Unit, Unit]]
+    """
+    Cached list of unweighted edges
+    """
+
+    _cached_weighted_edges: List[Tuple[Unit, Unit, float]]
+    """
+    Cached list of weighted edges
+    """
+
+    _cached_topological_ordered_nodes: List[Unit]
+    """
+    Cached list of topological sorted units
+    """
+
+    _cached_reversed_topological_ordered_nodes: List[Tuple[Unit, Unit]]
+    """
+    Cached list of reverse topological sorted units
+    """
+
     def __init__(self):
         super().__init__(None)
         nx.DiGraph.__init__(self)
+
+    def cache_structure(self):
+        """
+        Call once after building the circuit:
+        - cache nodes
+        - cache edge lists
+        - cache topo order & reverse topo order
+        """
+        assert not any(
+            hasattr(self, k) for k in ["_cached_nodes", "_cached_unw", "_cached_w", "_cached_topo", "_cached_rev"]), (
+            "Cache was already set! You should have invalidated it before changing the graph."
+        )
+
+        # 1) Nodes
+        self._cached_nodes = list(self.nodes)
+
+        # 2) Edges
+        all_edges = list(self.edges(data=True))
+        self._cached_unweighted_edges = [(u, v) for u, v, attr in all_edges
+                                         if "log_weight" not in attr]
+        self._cached_weighted_edges   = [(u, v, attr["log_weight"]) for u, v, attr in all_edges
+                                         if "log_weight" in attr]
+
+        # 3) Build successor map & in-degree
+        succ = {n: [] for n in self._cached_nodes}
+        in_deg = {n: 0 for n in self._cached_nodes}
+        for u, v in self._cached_unweighted_edges + [(u, v) for (u, v, _) in self._cached_weighted_edges]:
+            succ[u].append(v)
+            in_deg[v] += 1
+
+        # 4) Single Kahn run
+        queue = deque(n for n, d in in_deg.items() if d == 0)
+        topo = []
+        while queue:
+            n = queue.popleft()
+            topo.append(n)
+            for m in succ[n]:
+                in_deg[m] -= 1
+                if in_deg[m] == 0:
+                    queue.append(m)
+
+        self._cached_topological_ordered_nodes = topo
+        self._cached_reversed_topological_ordered_nodes  = list(reversed(topo))
+
+    def _invalidate_cache(self):
+        """Call this before any structure-changing operation."""
+        for k in ["_cached_nodes", "_cached_unw", "_cached_w", "_cached_topo", "_cached_rev"]:
+            if hasattr(self, k):
+                delattr(self, k)
 
     @classmethod
     def from_other(cls, other: Self) -> Self:
@@ -785,7 +869,7 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
         return nx.is_directed_acyclic_graph(self) and nx.is_weakly_connected(self)
 
     def add_node(self, node: Unit, **attr):
-
+        self._invalidate_cache()
         # write self as the nodes' circuit
         node.probabilistic_circuit = self
 
@@ -891,18 +975,18 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
         unreachable_nodes = set(self.nodes) - (reachable_nodes | {root})
         self.remove_nodes_from(unreachable_nodes)
 
-    def log_conditional_of_simple_event_in_place(self, simple_event: SimpleEvent) -> Tuple[Optional[Self], float]:
+    def log_truncated_of_simple_event_in_place(self, simple_event: SimpleEvent) -> Tuple[Optional[Self], float]:
         """
-        Construct the conditional circuit from a simple event.
+        Construct the truncated circuit from a simple event.
 
         :param simple_event: The simple event to condition on.
-        :return: The conditional circuit and the log-probability of the event
+        :return: The truncated circuit and the log-probability of the event
         """
         for layer in reversed(self.layers):
             for unit in layer:
                 if unit.is_leaf:
                     unit: LeafUnit
-                    unit.log_conditional_of_simple_event_in_place(simple_event)
+                    unit.log_truncated_of_simple_event_in_place(simple_event)
                 else:
                     unit: InnerUnit
                     unit.log_forward()
@@ -921,18 +1005,10 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
 
         return self, root.result_of_current_query
 
-    def log_conditional_in_place(self, event: Event) -> Tuple[Optional[Self], float]:
+    def log_truncated_in_place(self, event: Event) -> Tuple[Optional[Self], float]:
         """
-        Construct the conditional circuit from an event.
-        The event is not required to be a disjoint union of simple events.
-
-        However, if it is not a disjoint union, the probability of the event is not correct,
-        but the conditional distribution is.
-
-        :param event: The event to condition on.
-        :return: The root of the conditional circuit.
+        Efficiently compute the truncated for an Event, batching as much as possible.
         """
-
         # skip trivial case
         if event.is_empty():
             self.remove_nodes_from(list(self.nodes))
@@ -941,11 +1017,11 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
 
         # if the event is easy, don't create a proxy node
         elif len(event.simple_sets) == 1:
-            result = self.log_conditional_of_simple_event_in_place(event.simple_sets[0])
+            result = self.log_truncated_of_simple_event_in_place(event.simple_sets[0])
             return result
 
         # create a conditional circuit for every simple event
-        conditional_circuits = [self.__copy__().log_conditional_of_simple_event_in_place(simple_event) for simple_event
+        conditional_circuits = [self.__copy__().log_truncated_of_simple_event_in_place(simple_event) for simple_event
                                 in event.simple_sets]
 
         # clear this circuit
@@ -969,9 +1045,9 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
         result.normalize()
         return self, result.result_of_current_query
 
-    def log_conditional(self, event: Event) -> Tuple[Optional[Self], float]:
+    def log_truncated(self, event: Event) -> Tuple[Optional[Self], float]:
         result = self.__copy__()
-        return result.log_conditional_in_place(event)
+        return result.log_truncated_in_place(event)
 
     def marginal_in_place(self, variables: Iterable[Variable]) -> Optional[Self]:
         result = [node.marginal(variables) for layer in reversed(self.layers) for node in layer][-1]
@@ -982,17 +1058,20 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
         else:
             return None
 
-    def log_conditional_of_point_in_place(self, point: Dict[Variable, Any]) -> Tuple[Optional[Self], float]:
+    def log_conditional_in_place(self, point: Dict[Variable, Any]) -> Tuple[Optional[Self], float]:
 
         # do forward pass
         for layer in reversed(self.layers):
             for unit in layer:
                 if unit.is_leaf:
                     unit: LeafUnit
-                    unit.log_conditional_of_point_in_place(point)
-                else:
-                    unit: InnerUnit
+                    unit.log_conditional_in_place(point)
+                elif isinstance(unit, SumUnit):
+                    unit.log_forward_conditioning()
+                elif isinstance(unit, ProductUnit):
                     unit.log_forward()
+                else:
+                    raise NotImplementedError()
 
         # clean the circuit up
         root = self.root
@@ -1007,7 +1086,13 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
         # simplify dirac parts
         remaining_variables = [v for v in self.variables if v not in point]
 
+
         self.marginal_in_place(remaining_variables)
+
+        if len(remaining_variables) > 0:
+            root = self.root
+
+        # add dirac parts
         new_root = ProductUnit(self)
 
         if len(remaining_variables) > 0:
@@ -1023,9 +1108,9 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
 
         return self, root.result_of_current_query
 
-    def log_conditional_of_point(self, point: Dict[Variable, Any]) -> Tuple[Optional[Self], float]:
+    def log_conditional(self, point: Dict[Variable, Any]) -> Tuple[Optional[Self], float]:
         result = self.__copy__()
-        return result.log_conditional_of_point_in_place(point)
+        return result.log_conditional_in_place(point)
 
     def marginal(self, variables: Iterable[Variable]) -> Optional[Self]:
         result = self.__copy__()
@@ -1091,16 +1176,30 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
         """
         return self.__class__()
 
-    def __copy__(self):
+    def __copy__(self, precomputed=None):
+        """
+        Fast copy: only use precomputed = (nodes, unw, weighted) if provided,
+        else fallback to walking the graph.
+        """
+        if precomputed is None:
+            nodes = list(self.nodes)
+            unw = [(u, v) for u, v, attr in self.edges(data=True)
+                   if "log_weight" not in attr]
+            wgt = [(u, v, attr["log_weight"]) for u, v, attr in self.edges(data=True)
+                   if "log_weight" in attr]
+        else:
+            nodes, unw, wgt = precomputed
+
+        # Use fast dict comprehension for copying nodes
         result = self.empty_copy()
-        new_node_map = {node: node.__copy__() for node in self.nodes}
-        result.add_nodes_from(new_node_map.values())
-        new_unweighted_edges = [(new_node_map[source], new_node_map[target]) for source, target in
-                                self.unweighted_edges]
-        new_weighted_edges = [(new_node_map[source], new_node_map[target], log_weight) for source, target, log_weight in
-                              self.log_weighted_edges]
-        result.add_edges_from(new_unweighted_edges)
-        result.add_weighted_edges_from(new_weighted_edges, weight="log_weight")
+        new_map = {n: n.__copy__() for n in nodes}
+        result.add_nodes_from(new_map.values())
+        # Add edges directly from precomputed lists
+        result.add_edges_from((new_map[u], new_map[v]) for u, v in unw)
+        result.add_weighted_edges_from(
+            ((new_map[u], new_map[v], lw) for u, v, lw in wgt),
+            weight="log_weight"
+        )
         return result
 
     def to_json(self) -> Dict[str, Any]:
@@ -1211,6 +1310,7 @@ class ProbabilisticCircuit(ProbabilisticModel, nx.DiGraph, SubclassJSONSerialize
     def add_weighted_edges_from(
         self, ebunch_to_add, weight = "log_weight", **attr
     ):
+        self._invalidate_cache()
         return super().add_weighted_edges_from(ebunch_to_add, weight=weight, **attr)
 
     def subgraph_of(self, node: Unit) -> Self:
@@ -1547,10 +1647,10 @@ class UnivariateLeaf(LeafUnit):
 class UnivariateContinuousLeaf(UnivariateLeaf):
     distribution: Optional[ContinuousDistribution]
 
-    def log_conditional_of_simple_event_in_place(self, event: SimpleEvent):
-        return self.univariate_log_conditional_of_simple_event_in_place(event[self.variable])
+    def log_truncated_of_simple_event_in_place(self, event: SimpleEvent):
+        return self.univariate_log_truncated_of_simple_event_in_place(event[self.variable])
 
-    def univariate_log_conditional_of_simple_event_in_place(self, event: Interval):
+    def univariate_log_truncated_of_simple_event_in_place(self, event: Interval):
         """
         Condition this distribution on a simple event in-place but use sum units to create conditions on composite
         intervals.
@@ -1565,7 +1665,7 @@ class UnivariateContinuousLeaf(UnivariateLeaf):
 
         total_probability = 0.
 
-        # calculate the conditional distribution as sum unit
+        # calculate the truncated distribution as sum unit
         result = SumUnit(self.probabilistic_circuit)
 
         for simple_interval in event.simple_sets:
